@@ -28,9 +28,11 @@ from .config import (
 from .converter import compute_grid, render_frame
 from .renderer import (
     Renderer,
+    _COLOR_OFF,
     _has_console,
     console_vt_enabled,
     get_terminal_size,
+    probe_terminal,
     supports_ansi,
     supports_true_color,
     terminal_host,
@@ -254,6 +256,24 @@ def _wait_for_first_frame(camera: Camera, renderer: Renderer, timeout: float = 3
     return None
 
 
+def _open_renderer(state: State, out_stream=None) -> Renderer:
+    """Probe the terminal and construct a renderer for the best supported backend.
+
+    This is the only place that enables virtual-terminal processing. Doing it
+    here rather than in the Renderer constructor keeps detection side-effect
+    free for tests, and puts the one mutation that fixes a host printing escapes
+    literally on the normal startup path.
+    """
+    stream = out_stream if out_stream is not None else sys.stdout
+    profile = probe_terminal(stream, enable_vt=True)
+    renderer = Renderer(
+        out_stream=stream,
+        color_levels=state.color_quantize,
+        profile=profile,
+    )
+    return renderer
+
+
 def run(
     camera: Camera | None = None,
     renderer: Renderer | None = None,
@@ -261,7 +281,10 @@ def run(
 ) -> int:
     """Run the capture loop. Returns a process exit code."""
     state = State(config)
-    renderer = renderer or Renderer(color_levels=state.color_quantize)
+    profile = None
+    if renderer is None:
+        renderer = _open_renderer(state)
+        profile = renderer.profile
     owned = camera is None
     camera = camera or ThreadedCamera(index=0)
 
@@ -272,6 +295,7 @@ def run(
     frame_interval = 1.0 / state.target_fps if state.target_fps > 0 else 0.0
     missing_frames = 0
     show_error = False
+    term_size = None
 
     renderer.clear()
     renderer.show_cursor_off()
@@ -279,13 +303,13 @@ def run(
     # Size the capture to the terminal before opening the device, so the camera
     # supplies roughly the pixels the grid can use.
     if cols == 0:
-            term_cols, term_rows = get_terminal_size()
-            state.term_cols, state.term_rows = term_cols, term_rows
-            cols, rows = compute_grid(
-                term_cols, term_rows, margin=state.margin,
-                char_aspect=state.char_aspect, source_aspect=16 / 9,
-            )
-            term_size = (term_cols, term_rows)
+        term_cols, term_rows = get_terminal_size()
+        state.term_cols, state.term_rows = term_cols, term_rows
+        cols, rows = compute_grid(
+            term_cols, term_rows, margin=state.margin,
+            char_aspect=state.char_aspect, source_aspect=16 / 9,
+        )
+        term_size = (term_cols, term_rows)
     if hasattr(camera, "width"):
         camera.width, camera.height = capture_size_for_grid(cols, rows)
 
@@ -294,6 +318,10 @@ def run(
             camera.open()
         resolution = camera.actual_resolution
         frame = _wait_for_first_frame(camera, renderer)
+
+        # Report the chosen backend once, inside the terminal, before the image
+        # takes it over. Skippable with any key so it never blocks.
+        renderer.show_startup_summary(seconds=2.5)
 
         while state.running:
             # Frame time is measured from the top of the loop so the pacing sleep
@@ -369,15 +397,27 @@ def run(
             camera.close()
         renderer.show_cursor_on()
         with contextlib.suppress(Exception):
-            renderer.out.write(RESET_COLOR)
+            # Reset only, with no cursor positioning: a terminal that rejects
+            # escapes must not have them appended to whatever is on screen.
+            renderer.out.write(_COLOR_OFF)
             renderer.out.flush()
+        if profile is not None:
+            # Put the console mode back exactly as it was found.
+            with contextlib.suppress(Exception):
+                profile.restore()
     return 0
 
 
 def _render_message(renderer: Renderer, message: str, rows: int, cols: int) -> None:
-    """Show a plain-text status message at the top of the screen."""
+    """Show a plain-text status message at the top of the screen.
+
+    Routed through the renderer's own cursor and erase primitives so it never
+    emits an escape a non-ANSI host would print into the image.
+    """
     with contextlib.suppress(Exception):
-        renderer.out.write(f"{ESC}[1;1H{ESC}[2K{message}\r\n")
+        renderer._move_to(0, 0)
+        renderer.out.write(message)
+        renderer._erase_to_end_of_line(0, len(message), cols)
         renderer.out.flush()
 
 

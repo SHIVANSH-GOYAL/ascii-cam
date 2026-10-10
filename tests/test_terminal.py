@@ -1,8 +1,9 @@
-"""Tests for terminal capability detection, ANSI output, and status width.
+"""Tests for terminal capability detection, renderer selection, and ANSI output.
 
-The cross-machine failures these cover were not speculation: a real console was
-observed scrolling because the status line was longer than its width, and the
-capability probe was observed reading a nonexistent ``stream.env``.
+The failures these cover were observed rather than invented: a real console was
+seen scrolling because the status line was longer than its width, and the
+capability probe was seen reading a ``stream.env`` attribute that ``sys.stdout``
+does not have.
 """
 
 from __future__ import annotations
@@ -12,13 +13,17 @@ import unittest
 
 import numpy as np
 
+from ascii_cam.config import MODE_MONOCHROME, MODE_PHOSPHOR, MODE_TRUE_COLOR
 from ascii_cam.config import STATUS_TEMPLATE
 from ascii_cam.renderer import (
     Renderer,
+    TerminalProfile,
     _env_of,
     console_vt_enabled,
     enable_console_vt,
     get_terminal_size,
+    probe_terminal,
+    restore_console_mode,
     supports_ansi,
     supports_true_color,
     terminal_host,
@@ -244,14 +249,19 @@ class TestStatusWidth(unittest.TestCase):
         self.assertIn("@@@@@@@@@@", stream.value)
 
 
+def _status_text():
+    """Render the status template with a representative set of values."""
+    return STATUS_TEMPLATE.format(
+        fps=23.8, res="640x480", mode="monochrome", detail="balanced",
+        contrast=1.0, brightness=0.0, gamma=1.0, mirror="on", black_cutoff=0.04,
+        renderer="ansi", color="24bit",
+    )
+
+
 class TestStatusTemplateWidth(unittest.TestCase):
     def test_full_template_exceeds_common_widths(self):
         """Documents why clamping is required at all."""
-        text = STATUS_TEMPLATE.format(
-            fps=23.8, res="640x480", mode="monochrome", detail="balanced",
-            contrast=1.0, brightness=0.0, gamma=1.0, mirror="on", black_cutoff=0.04,
-        )
-        self.assertGreater(len(text), 80)
+        self.assertGreater(len(_status_text()), 80)
 
     def test_vitals_fit_a_standard_terminal(self):
         """The live readout must survive an 80-column console.
@@ -259,23 +269,24 @@ class TestStatusTemplateWidth(unittest.TestCase):
         The full line is longer than that by design; the renderer clamps it. What
         matters is that clamping costs the control hints, never the vitals.
         """
-        text = STATUS_TEMPLATE.format(
-            fps=23.8, res="640x480", mode="monochrome", detail="balanced",
-            contrast=1.0, brightness=0.0, gamma=1.0, mirror="on",
-            black_cutoff=0.04,
-        )
-        vitals = text.split("|")[0]
+        vitals = _status_text().split("|")[0]
         self.assertLessEqual(len(vitals), 80)
 
     def test_truncation_keeps_every_vital_field(self):
-        text = STATUS_TEMPLATE.format(
-            fps=23.8, res="640x480", mode="monochrome", detail="balanced",
-            contrast=1.0, brightness=0.0, gamma=1.0, mirror="on",
-            black_cutoff=0.04,
-        )
+        text = _status_text()
         for field in ("FPS", "640x480", "monochrome", "balanced", "C:1.00",
                       "B:+0.00", "G:1.00", "mir:on", "blk:0.04"):
             self.assertLess(text.index(field), text.index("|"), field)
+
+    def test_reports_renderer_and_color_backend(self):
+        """A fallback must be visible without a separate diagnostic command."""
+        text = _status_text()
+        self.assertIn("rnd:ansi", text)
+        self.assertIn("col:24bit", text)
+        fallback = _status_text().replace("rnd:ansi", "rnd:win32").replace(
+            "col:24bit", "col:none"
+        )
+        self.assertIn("rnd:win32", fallback)
 
 
 class TestTerminalResizing(unittest.TestCase):
@@ -383,6 +394,181 @@ class TestAnsiOutput(unittest.TestCase):
         )
         self.assertNotIn("\x1b[2J\x1b[", stream.value)
         self.assertNotIn("\x1b[2K", stream.value)
+
+
+class TestRendererBackendSelection(unittest.TestCase):
+    """The renderer must pick a backend the host can actually take.
+
+    A console without VT processing prints escape sequences as literal text,
+    which corrupts the image rather than only the colors, so the backend choice
+    is the difference between a working app and a broken one.
+    """
+
+    def _profile(self, **kw):
+        defaults = dict(
+            stream=FakeStream(), enable_vt=False, vt_enabled=True,
+            has_console=True, build=19045, host="Windows Terminal",
+        )
+        defaults.update(kw)
+        return TerminalProfile(**defaults)
+
+    def test_ansi_backend_when_vt_available(self):
+        profile = self._profile(vt_enabled=True)
+        self.assertTrue(profile.ansi)
+        self.assertEqual(profile.backend, "ansi")
+        self.assertIsNone(profile.fallback_reason)
+
+    def test_win32_backend_when_vt_unavailable_but_console_exists(self):
+        profile = self._profile(vt_enabled=False)
+        self.assertFalse(profile.ansi)
+        self.assertEqual(profile.backend, "win32")
+        self.assertIsNotNone(profile.fallback_reason)
+
+    def test_text_backend_when_no_console(self):
+        profile = self._profile(vt_enabled=False, has_console=False)
+        self.assertEqual(profile.backend, "text")
+        self.assertFalse(profile.ansi)
+
+    def test_no_truecolor_without_ansi(self):
+        profile = self._profile(vt_enabled=False)
+        self.assertFalse(profile.truecolor)
+        self.assertEqual(profile.color_support(), "none")
+
+    def test_color_support_labels(self):
+        self.assertEqual(self._profile(vt_enabled=True).color_support(), "24bit")
+        self.assertEqual(
+            self._profile(vt_enabled=True, build=17000).color_support(), "256"
+        )
+
+    def test_old_windows_build_loses_truecolor(self):
+        """Pre-1903 builds accept VT but clamp colors to the 16-color palette."""
+        profile = self._profile(vt_enabled=True, build=17763)
+        self.assertTrue(profile.ansi)
+        self.assertFalse(profile.truecolor)
+
+    def test_explicit_fallback_reason_is_reported(self):
+        profile = self._profile(
+            vt_enabled=False, fallback_reason="console refused VT"
+        )
+        self.assertEqual(profile.backend, "win32")
+        self.assertEqual(profile.fallback_reason, "console refused VT")
+
+    def test_summary_reports_backend_and_reason(self):
+        profile = self._profile(vt_enabled=False)
+        lines = profile.summary()
+        self.assertTrue(any("renderer" in line for line in lines))
+        self.assertTrue(any("fallback" in line for line in lines))
+
+    def test_probe_is_side_effect_free(self):
+        """Detection must not mutate the console; only startup enables VT."""
+        stream = FakeStream(term="xterm-256color", colorterm="truecolor")
+        probe_terminal(stream, enable_vt=False)
+        # Nothing was changed, so there is nothing to restore.
+        self.assertFalse(restore_console_mode())
+
+
+class TestEscapeGating(unittest.TestCase):
+    """No control byte may reach a host that would print it literally."""
+
+    def _renderer(self, backend: str, truecolor: bool = False):
+        profile = TerminalProfile(
+            stream=FakeStream(), vt_enabled=backend == "ansi",
+            has_console=backend != "text", build=19045,
+        )
+        renderer = Renderer(out_stream=profile.stream, profile=profile)
+        return renderer, profile.stream
+
+    def test_non_ansi_renderer_emits_no_escape_bytes(self):
+        for backend in ("win32", "text"):
+            renderer, stream = self._renderer(backend)
+            renderer.show_cursor_off()
+            renderer.clear()
+            renderer.render(
+                np.empty((3, 5), dtype=object).tolist() if False else self._grid(3, 5),
+                mode=MODE_MONOCHROME, term_size=(80, 24),
+            )
+            renderer.show_cursor_on()
+            value = stream.value
+            self.assertNotIn("\x1b", value, f"backend {backend} emitted escapes")
+
+    def test_ansi_renderer_still_emits_expected_escapes(self):
+        renderer, stream = self._renderer("ansi")
+        renderer.render(self._grid(2, 4), mode=MODE_MONOCHROME, term_size=(80, 20))
+        self.assertIn("\x1b[1;1H", stream.value)
+        self.assertIn("\x1b[2;1H", stream.value)
+
+    def test_hide_and_show_cursor_are_gated(self):
+        renderer, stream = self._renderer("win32")
+        renderer.show_cursor_off()
+        renderer.show_cursor_on()
+        self.assertNotIn("\x1b", stream.value)
+
+    def test_clear_is_gated(self):
+        renderer, stream = self._renderer("win32")
+        renderer.clear()
+        self.assertNotIn("\x1b", stream.value)
+
+    def test_status_bar_is_gated_too(self):
+        """The status line must not leak escapes into a non-ANSI host."""
+        renderer, stream = self._renderer("win32")
+        renderer.render(self._grid(2, 4), mode=MODE_MONOCHROME, term_size=(80, 20))
+        self.assertNotIn("\x1b", stream.value)
+
+    def test_image_still_renders_in_every_backend(self):
+        for backend in ("ansi", "win32", "text"):
+            renderer, stream = self._renderer(backend)
+            renderer.render(self._grid(1, 5, "@"), term_size=(80, 20))
+            self.assertIn("@@@@@", stream.value, backend)
+
+    def test_truecolor_falls_back_to_glyphs_without_color(self):
+        for backend in ("win32", "text"):
+            renderer, stream = self._renderer(backend)
+            colors = np.full((1, 4, 3), 120, np.uint8)
+            renderer.render(
+                self._grid(1, 4, "#"), mode=MODE_TRUE_COLOR, colors=colors,
+                term_size=(80, 20),
+            )
+            self.assertIn("####", stream.value, backend)
+            self.assertNotIn("\x1b", stream.value, backend)
+
+    def test_phosphor_falls_back_to_plain_glyphs(self):
+        for backend in ("win32", "text"):
+            renderer, stream = self._renderer(backend)
+            renderer.render(
+                self._grid(1, 4, "="), mode=MODE_PHOSPHOR, term_size=(80, 20)
+            )
+            self.assertIn("====", stream.value, backend)
+            self.assertNotIn("\x1b", stream.value, backend)
+
+    @staticmethod
+    def _grid(rows: int, cols: int, char: str = "#"):
+        grid = np.empty((rows, cols), dtype=object)
+        grid[:] = char
+        return grid
+
+
+class TestConsoleModeRoundTrip(unittest.TestCase):
+    """The console must be left as it was found."""
+
+    def test_restore_without_save_is_safe(self):
+        self.assertIsInstance(restore_console_mode(), bool)
+
+    def test_restore_is_idempotent(self):
+        restore_console_mode()
+        self.assertIsInstance(restore_console_mode(), bool)
+
+    def test_enable_console_vt_returns_bool(self):
+        self.assertIsInstance(enable_console_vt(), bool)
+
+    def test_console_vt_query_returns_bool_or_none(self):
+        result = console_vt_enabled()
+        self.assertTrue(result is None or isinstance(result, bool))
+
+    def test_get_console_mode_is_safe(self):
+        from ascii_cam.renderer import get_console_mode
+
+        mode = get_console_mode()
+        self.assertTrue(mode is None or isinstance(mode, int))
 
 
 if __name__ == "__main__":

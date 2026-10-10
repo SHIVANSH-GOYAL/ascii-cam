@@ -119,7 +119,7 @@ class TestStatusTemplate(unittest.TestCase):
         values = dict(
             fps=24.0, res="640x480", mode=MODE_MONOCHROME, detail="balanced",
             contrast=1.0, brightness=0.0, gamma=1.0, mirror="on",
-            black_cutoff=0.04,
+            black_cutoff=0.04, renderer="ansi", color="24bit",
         )
         values.update(over)
         return STATUS_TEMPLATE.format(**values)

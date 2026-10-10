@@ -109,11 +109,13 @@ PHOSPHOR_FG = (0, 255, 65)
 PHOSPHOR_BG = (0, 10, 0)
 
 # Status line. Vitals first and control hints last, so truncating a narrow
-# terminal drops the hints before it drops the live information.
+# terminal drops the hints before it drops the live information. The renderer and
+# color fields report the backend actually in use, which is how a fallback is
+# visible without a separate diagnostic command.
 STATUS_TEMPLATE = (
     "FPS:{fps:4.1f} {res} {mode} {detail} "
     "C:{contrast:.2f} B:{brightness:+.2f} G:{gamma:.2f} "
-    "mir:{mirror:<3} blk:{black_cutoff:.2f} | "
+    "mir:{mirror:<3} blk:{black_cutoff:.2f} | rnd:{renderer} col:{color} | "
     "Q quit 1 mono 2 phos 3 color D detail M mirror B black "
     "+-contrast []bright G gamma F fps Space freeze"
 )

@@ -195,17 +195,24 @@ the measured ordering is baked into `ascii_cam/config.py`. Set a custom ramp wit
 
 ```
 webcam ─► cv2.VideoCapture ─► mirror (cv2.flip) ─► CLAHE ─► unsharp mask
-                                                                    │
-                 ┌──────────────────────────────────────────────────┘
-                 ▼
-           luminance ──► resize (INTER_AREA) ──► normalize ──► ramp index ──► glyph
-                 │                                          │
-                 └──► enhance ──► resize ──► color sample ◄─┘  (true color, same cells)
-                                                                    │
-                                                           ANSI row strings
-                                                                    │
-                                                      cursor-positioned write
+                                                                     │
+                  ┌──────────────────────────────────────────────────┘
+                  ▼
+            luminance ──► resize (INTER_AREA) ──► normalize ──► ramp index ──► glyph
+                  │                                          │
+                  └──► enhance ──► resize ──► color sample ◄─┘  (true color, same cells)
+                                                                     │
+                                                              row strings
+                                                                     │
+                                          probe host ──► ansi / win32 / line backend
+                                                                     │
+                                                        cursor-positioned write
 ```
+
+Before the first frame is drawn, `probe_terminal()` measures the host: whether
+virtual-terminal processing is on (and tries to turn it on when it is not),
+whether a console is attached, the OS build, and `TERM`/`COLORTERM`. That single
+measurement decides the render backend, and everything downstream respects it.
 
 1. **Capture** (`ascii_cam/camera.py`) decodes frames on a background thread and
    hands the renderer the most recent one, so the pipeline never blocks on
@@ -290,18 +297,33 @@ You can also launch the app as a module:
 python -m ascii_cam
 ```
 
-## Supported terminals
+## Terminal compatibility
 
-| Terminal                     | Status |
-|------------------------------|--------|
-| Windows Terminal             | Full support, all three modes |
-| PowerShell 7 in Windows Terminal | Full support |
-| VS Code integrated terminal   | Full support |
-| Windows Console Host (conhost) | Works; true color depends on Windows version |
-| macOS Terminal.app, iTerm2, GNOME Terminal, Windows Subsystem for Linux | Works |
+The app picks its rendering backend automatically at startup, so nothing needs to
+be installed or configured on the machine it runs on:
 
-The app checks `TERM` / `COLORTERM` and falls back to monochrome when ANSI
-color is unavailable.
+| Backend | When it is chosen | What it does |
+|---------|-------------------|--------------|
+| `ansi` | Virtual-terminal processing is available, or was enabled successfully | Full escape-based rendering with 24-bit color |
+| `win32` | VT is unavailable but a console exists | Cursor positioning and line clearing through the Win32 console API. No escape bytes at all, and no color. |
+| `text` | No console attached (output redirected) | Plain line output, no positioning |
+
+Virtual-terminal processing is enabled through `SetConsoleMode` on startup when
+the host leaves it off, and the original console mode is restored on exit. That is
+the single call that fixes a console printing escape sequences literally.
+
+The active backend is always visible in the status line as `rnd:` and `col:`, so a
+fallback is never silent. A one-line summary also appears on the terminal for the
+first couple of seconds after launch; press any key to skip it.
+
+Colors degrade the same way: 24-bit when the host and OS build support it
+(Windows 10 1903 or newer), 16-color on older Windows builds, none on the non-ANSI
+backends. In every case the picture is drawn — a host that cannot take color gets
+glyphs, never literal escape text.
+
+`python diagnose.py` replays the exact bytes the app emits through a small
+terminal emulator and prints the reconstructed screen, which is the tool for
+confirming what a specific host is really receiving.
 
 ## Performance
 
@@ -469,13 +491,31 @@ tall, raise it if it looks too wide.
 The app requires a real terminal. Run it directly in a terminal, not with output
 redirected.
 
+**Escape sequences appear literally in the image, mixed with the status bar**
+This is the symptom of a console with virtual-terminal processing disabled, and
+the source of a real cross-machine bug. Two things now handle it: the app enables
+VT through `SetConsoleMode` when the host leaves it off, and if that fails it
+switches to the `win32` backend, which positions the cursor through the console
+API and emits no escape bytes at all. The status line shows
+`rnd:win32 col:none` when that happens. Check the one-line startup summary, or
+run `python main.py --diagnose` and look at `renderer`, `VT processing`, and
+`24-bit color`.
+
+**Colors are wrong, or mode 3 looks monochrome**
+The app probes the console's VT flag and the OS build rather than assuming. On
+Windows, 24-bit SGR needs Windows 10 build 18362 or newer; earlier builds accept
+VT but clamp to a 16-color palette. The status line reports `col:24bit`,
+`col:256`, or `col:none`. When 24-bit is genuinely unavailable, mode 3 still draws
+the glyphs, just without color, so the picture is never lost.
+
 **The image drifts upward or flickers, but only on one machine**
-The status line was clamped to the real console width, so it can no longer wrap.
+The status line is clamped to the real console width, so it can no longer wrap.
 Before that fix, a status line longer than the console width wrapped on the final
 row and scrolled the terminal once per frame — visible as steady upward drift.
 The effect depends only on console width, so two machines with identical hardware
-but different window sizes could look completely different. If this still
-happens, compare `python main.py --diagnose` between the machines and check the
+but different window sizes could look completely different. If it still happens,
+compare `python main.py --diagnose` between the machines and check `size` and
+`VT processing`.
 `size` and `VT processing` lines.
 
 **Colors are wrong, or mode 3 looks monochrome**
@@ -485,14 +525,6 @@ earlier builds accept VT but clamp to a 16-color palette. Run
 `python main.py --diagnose` and check `VT processing`, `24-bit color`, and
 `build`. If VT is off, the app now attempts to enable it at startup. When 24-bit
 is genuinely unavailable, mode 3 still draws the glyphs, just without color.
-
-**Pressing 3 shows no colour**
-That was a real bug, not a terminal limitation. The capability probe read
-`TERM`/`COLORTERM` only, and Windows leaves both unset even inside Windows
-Terminal, so mode 3 silently rendered monochrome. It is fixed: on Windows, ANSI
-support now implies 24-bit support. Regression tests:
-`test_windows_true_color_is_assumed` and
-`test_renderer_uses_color_when_supported`.
 
 **Dark areas look empty and I want the detail back**
 That is the black cutoff. Press `B` until the status line reads `blk:0.00`, or
