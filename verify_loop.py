@@ -114,7 +114,7 @@ def main() -> int:
     expected_size = capture_size_for_grid(start_cols, start_rows)
     ok &= check(
         f"capture resolution matches the grid ({expected_size[0]}x{expected_size[1]})",
-        f"| {expected_size[0]}x{expected_size[1]} |" in out,
+        f"{expected_size[0]}x{expected_size[1]}" in out,
     )
     ok &= check(
         "capture size is a standard resolution",

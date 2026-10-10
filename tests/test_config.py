@@ -132,8 +132,9 @@ class TestStatusTemplate(unittest.TestCase):
 
     def test_template_includes_controls(self):
         text = self._fmt()
-        for hint in ("Q/Esc", "1 mono", "3 color", "D detail", "M mirror",
-                     "B black", "contrast", "G gamma", "F fps", "Space", "freeze"):
+        for hint in ("Q quit", "1 mono", "2 phos", "3 color", "D detail",
+                     "M mirror", "B black", "contrast", "G gamma", "F fps",
+                     "Space", "freeze"):
             self.assertIn(hint, text)
 
     def test_template_mentions_every_control_key(self):
@@ -142,16 +143,29 @@ class TestStatusTemplate(unittest.TestCase):
             self.assertIn(key, text)
 
     def test_template_shows_mirror_state(self):
-        self.assertIn("mirror: on", self._fmt(mirror="on"))
-        self.assertIn("mirror: off", self._fmt(mirror="off"))
+        self.assertIn("mir:on", self._fmt(mirror="on"))
+        self.assertIn("mir:off", self._fmt(mirror="off"))
 
     def test_template_shows_black_cutoff(self):
         text = self._fmt(black_cutoff=0.15)
-        self.assertIn("black: 0.15", text)
+        self.assertIn("blk:0.15", text)
+
+    def test_vitals_come_before_control_hints(self):
+        """Truncation must never remove live information before the hints.
+
+        The status line is clamped to the console width, so the ordering is what
+        decides what survives on a narrow terminal.
+        """
+        text = self._fmt()
+        vitals_end = text.index("|")
+        hint_start = text.index("Q quit")
+        self.assertLess(vitals_end, hint_start)
+        for field in ("FPS", "640x480", "monochrome", "balanced", "mir:on"):
+            self.assertLess(text.index(field), vitals_end)
 
     def test_status_is_compact(self):
         """The status line must not crowd out the image on a narrow terminal."""
-        self.assertLessEqual(len(self._fmt()), 260)
+        self.assertLessEqual(len(self._fmt()), 200)
 
 
 class TestDefaultConfig(unittest.TestCase):

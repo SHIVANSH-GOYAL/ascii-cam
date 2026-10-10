@@ -65,7 +65,38 @@ Pick a camera by index when more than one is available:
 python main.py --camera=1
 ```
 
-`--camera=` is the only command-line option. Everything else is a runtime key.
+Two flags are supported:
+
+```bash
+python main.py --diagnose            # report the environment, then render 3s
+python main.py --diagnose --seconds 5
+```
+
+`--camera=` is the only option that affects normal operation; everything else is a
+runtime key.
+
+### Diagnosing a machine that renders differently
+
+`--diagnose` exists for the case where the app works on one machine and looks
+wrong on another with the same hardware. It prints the terminal size, detected
+host, VT-processing state, color capability, terminal window-versus-buffer
+sizes, the render grid, the camera resolution the app will request, dependency
+versions, and a measured frame rate. Compare the output between the two machines:
+
+```bash
+python main.py --diagnose > machine-a.txt 2>&1
+python main.py --diagnose > machine-b.txt 2>&1
+diff machine-a.txt machine-b.txt
+```
+
+The lines that matter most are **VT processing**, **24-bit color**, **host**, and
+**camera resolution**. `TERM` is normally unset on Windows even inside Windows
+Terminal, so an unset value there is expected and not a problem by itself.
+
+`python diagnose.py` is a separate, stronger check: it replays the exact bytes
+the app emits through a small terminal emulator and prints the reconstructed
+screen, so it catches wrapping, bad cursor moves, and color that bleeds between
+rows.
 
 ## Controls
 
@@ -438,8 +469,33 @@ tall, raise it if it looks too wide.
 The app requires a real terminal. Run it directly in a terminal, not with output
 redirected.
 
+**The image drifts upward or flickers, but only on one machine**
+The status line was clamped to the real console width, so it can no longer wrap.
+Before that fix, a status line longer than the console width wrapped on the final
+row and scrolled the terminal once per frame — visible as steady upward drift.
+The effect depends only on console width, so two machines with identical hardware
+but different window sizes could look completely different. If this still
+happens, compare `python main.py --diagnose` between the machines and check the
+`size` and `VT processing` lines.
+
+**Colors are wrong, or mode 3 looks monochrome**
+The app reads the console's VT-processing flag and the OS build rather than
+assuming True. On Windows, 24-bit SGR needs Windows 10 build 18362 or newer;
+earlier builds accept VT but clamp to a 16-color palette. Run
+`python main.py --diagnose` and check `VT processing`, `24-bit color`, and
+`build`. If VT is off, the app now attempts to enable it at startup. When 24-bit
+is genuinely unavailable, mode 3 still draws the glyphs, just without color.
+
+**Pressing 3 shows no colour**
+That was a real bug, not a terminal limitation. The capability probe read
+`TERM`/`COLORTERM` only, and Windows leaves both unset even inside Windows
+Terminal, so mode 3 silently rendered monochrome. It is fixed: on Windows, ANSI
+support now implies 24-bit support. Regression tests:
+`test_windows_true_color_is_assumed` and
+`test_renderer_uses_color_when_supported`.
+
 **Dark areas look empty and I want the detail back**
-That is the black cutoff. Press `B` until the status line reads `black: 0.00`, or
+That is the black cutoff. Press `B` until the status line reads `blk:0.00`, or
 raise `black_cutoff`'s neighbors in `BLACK_CUTOFF_PRESETS`. If everything looks
 flat instead, press `D` for the `flat` preset or lower the clip limits in
 `DETAIL_PRESETS`.
@@ -548,17 +604,17 @@ ascii_cam/
   config.py      ASCII ramps, gamma presets, detail presets, escape sequences
   camera.py      capture wrapper, threaded reader, adaptive capture sizing
   converter.py   mirror, CLAHE, sharpen, resize, luminance, black cutoff, ramp
-  renderer.py    cursor-positioned ANSI output, true color, phosphor
-  main.py        State, key handling, and the render loop
+  renderer.py    capability probing, cursor-positioned ANSI output, color
+  main.py        State, key handling, render loop, --diagnose
 main.py               CLI entry point
+diagnose.py           replay the output through a terminal emulator
+verify_loop.py        end-to-end loop checks
+bench_loop.py         per-stage timing of the render loop
+bench_attribution.py  CPU cost: reader thread vs full loop vs control
+bench_modes.py        fps and bytes per mode/detail preset
 calibrate_ramp.py     measure glyph ink coverage to build the ramp
 compare_renderers.py  legacy vs upgraded on the same live frames
-diagnose.py          replay output through a terminal emulator
-verify_loop.py       end-to-end loop checks
-bench_loop.py        per-stage timing of the render loop
-bench_attribution.py CPU cost: reader thread vs full loop vs control
-bench_modes.py       fps and bytes per mode/detail preset
-tests/               unit tests
+tests/                unit tests
 ```
 
 Every script except `calibrate_ramp.py` requires a working camera, unless it is a

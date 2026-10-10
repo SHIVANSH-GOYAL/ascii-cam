@@ -108,11 +108,12 @@ DEFAULT_CONFIG = {
 PHOSPHOR_FG = (0, 255, 65)
 PHOSPHOR_BG = (0, 10, 0)
 
-# Status line. Placeholders are filled by renderer.Renderer._status.
+# Status line. Vitals first and control hints last, so truncating a narrow
+# terminal drops the hints before it drops the live information.
 STATUS_TEMPLATE = (
-    "FPS: {fps:5.1f} | {res} | {mode:<11} | detail: {detail:<8} | contrast: "
-    "{contrast:.2f} bright: {brightness:+.2f} gamma: {gamma:.2f} | "
-    "mirror: {mirror:<3} black: {black_cutoff:.2f} | Q/Esc 1 mono 2 phos "
-    "3 color D detail M mirror B black +/- contrast [/] bright G gamma "
-    "F fps Space freeze"
+    "FPS:{fps:4.1f} {res} {mode} {detail} "
+    "C:{contrast:.2f} B:{brightness:+.2f} G:{gamma:.2f} "
+    "mir:{mirror:<3} blk:{black_cutoff:.2f} | "
+    "Q quit 1 mono 2 phos 3 color D detail M mirror B black "
+    "+-contrast []bright G gamma F fps Space freeze"
 )

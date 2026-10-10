@@ -171,24 +171,28 @@ class TestRenderer(unittest.TestCase):
         renderer.render(grid, mode="phosphor")
         # Characters always survive, color support aside.
         self.assertIn("====", limited.value)
-        if not renderer._supports_color:
-            self.assertNotIn("38;2;", limited.value)
-        # Windows claims ANSI even for TERM=dumb because Windows Terminal and
-        # PowerShell need it, so only the non-Windows path can assert the loss.
-        if sys.platform.startswith("win"):
-            self.assertTrue(renderer._supports_color)
+        # TERM=dumb is an explicit opt-out and is honored on every platform.
+        self.assertFalse(renderer._supports_color)
+        self.assertNotIn("38;2;", limited.value)
 
     def test_status_reports_mirror_state(self):
-        self.renderer.render(make_grid(rows=1, cols=4), mode="monochrome", mirror=True)
-        self.assertIn("mirror: on", self.stream.value)
+        self.renderer.render(
+            make_grid(rows=1, cols=4), mode="monochrome", mirror=True
+        )
+        self.assertIn("mir:on", self.stream.value)
         self.stream.chunks.clear()
         self.renderer.clear()
-        self.renderer.render(make_grid(rows=1, cols=4), mode="monochrome", mirror=False)
-        self.assertIn("mirror: off", self.stream.value)
+        self.renderer.render(
+            make_grid(rows=1, cols=4), mode="monochrome", mirror=False
+        )
+        self.assertIn("mir:off", self.stream.value)
 
     def test_status_reports_detail_preset(self):
-        self.renderer.render(make_grid(rows=1, cols=4), detail="high")
-        self.assertIn("detail: high", self.stream.value)
+        self.renderer.render(
+            make_grid(rows=1, cols=4), detail="high", term_size=(200, 50)
+        )
+        self.assertIn("high", self.stream.value)
+        self.assertIn("C:1.00", self.stream.value)
 
     def test_erases_to_end_of_line_after_each_row(self):
         # ESC[0K clears stale trailing text without erasing the drawn row.

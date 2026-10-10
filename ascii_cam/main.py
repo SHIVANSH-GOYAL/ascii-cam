@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import select
 import sys
 import time
@@ -25,7 +26,16 @@ from .config import (
     MODE_TRUE_COLOR,
 )
 from .converter import compute_grid, render_frame
-from .renderer import Renderer, get_terminal_size
+from .renderer import (
+    Renderer,
+    _has_console,
+    console_vt_enabled,
+    get_terminal_size,
+    supports_ansi,
+    supports_true_color,
+    terminal_host,
+    windows_build,
+)
 
 RESET_COLOR = "\033[0m"
 NO_CAMERA = (
@@ -51,6 +61,9 @@ class State:
         self.target_fps = float(cfg["target_fps"])
         self.margin = int(cfg["margin"])
         self.char_aspect = float(cfg["char_aspect"])
+        # Set on each frame from the terminal, and used to clamp the status line.
+        self.term_cols: int | None = None
+        self.term_rows: int | None = None
         self.mirror = bool(cfg["mirror"])
         self.ramp = cfg["ramp"]
         self.color_quantize = int(cfg.get("color_quantize", 16))
@@ -180,17 +193,24 @@ def _drain_keys(state: State) -> None:
         apply_key(key, state)
 
 
-def _grid_size(state: State, resolution) -> tuple[int, int]:
-    """Recompute the grid from the current terminal size."""
+def _grid_size(state: State, resolution) -> tuple[int, int, tuple[int, int]]:
+    """Recompute the grid from the current terminal size.
+
+    Returns (cols, rows, term_size). The terminal size is returned too, because
+    the status line has to be clamped to the real console width to stop it
+    wrapping and scrolling the screen.
+    """
     term_cols, term_rows = get_terminal_size()
+    state.term_cols, state.term_rows = term_cols, term_rows
     source_aspect = (resolution[0] / resolution[1]) if resolution else (16 / 9)
-    return compute_grid(
+    grid = compute_grid(
         term_cols,
         term_rows,
         margin=state.margin,
         char_aspect=state.char_aspect,
         source_aspect=source_aspect,
     )
+    return grid[0], grid[1], (term_cols, term_rows)
 
 
 def _prepare_frame(frame, state: State, cols: int, rows: int):
@@ -259,11 +279,13 @@ def run(
     # Size the capture to the terminal before opening the device, so the camera
     # supplies roughly the pixels the grid can use.
     if cols == 0:
-        term_cols, term_rows = get_terminal_size()
-        cols, rows = compute_grid(
-            term_cols, term_rows, margin=state.margin,
-            char_aspect=state.char_aspect, source_aspect=16 / 9,
-        )
+            term_cols, term_rows = get_terminal_size()
+            state.term_cols, state.term_rows = term_cols, term_rows
+            cols, rows = compute_grid(
+                term_cols, term_rows, margin=state.margin,
+                char_aspect=state.char_aspect, source_aspect=16 / 9,
+            )
+            term_size = (term_cols, term_rows)
     if hasattr(camera, "width"):
         camera.width, camera.height = capture_size_for_grid(cols, rows)
 
@@ -282,9 +304,9 @@ def run(
             if not state.running:
                 break
 
-            new_size = _grid_size(state, resolution)
-            if new_size != (cols, rows):
-                cols, rows = new_size
+            new_cols, new_rows, term_size = _grid_size(state, resolution)
+            if (new_cols, new_rows) != (cols, rows):
+                cols, rows = new_cols, new_rows
                 renderer.clear()
 
             if not state.frozen:
@@ -320,6 +342,7 @@ def run(
                 detail=state.detail[0],
                 mirror=state.mirror,
                 black_cutoff=state.black_cutoff,
+                term_size=term_size,
             )
             if show_error:
                 _render_message(renderer, NO_CAMERA, rows, cols)
@@ -358,6 +381,11 @@ def _render_message(renderer: Renderer, message: str, rows: int, cols: int) -> N
         renderer.out.flush()
 
 
+def _error(msg: str) -> None:
+    """Write a message to stderr."""
+    sys.stderr.write(f"{msg}\n")
+
+
 def _report_camera_error(exc: CameraError) -> None:
     """Report a camera failure on stderr, listing indices that did open."""
     _error(str(exc))
@@ -368,25 +396,168 @@ def _report_camera_error(exc: CameraError) -> None:
         _error(f"Try: python main.py --camera={available[0]}")
 
 
-def _error(msg: str) -> None:
-    sys.stderr.write(f"{msg}\n")
+def diagnostic_report(seconds: float = 3.0, camera: Camera | None = None) -> int:
+    """Report terminal capabilities, camera, dependencies, and measured FPS.
+
+    Intended for comparing two machines that should be identical. Every value is
+    read rather than assumed, and the printout happens before the render pass so
+    the report is not interleaved with frames.
+    """
+    term_cols, term_rows = get_terminal_size()
+    grid = compute_grid(term_cols, term_rows, source_aspect=16 / 9)
+
+    lines = [
+        "=== environment ===",
+        f"python            : {sys.version.split()[0]}",
+        f"platform          : {sys.platform}",
+        f"build             : {windows_build() or 'unknown'}",
+        f"host              : {terminal_host()}",
+        f"TERM              : {os.environ.get('TERM', '(unset)')}",
+        f"COLORTERM         : {os.environ.get('COLORTERM', '(unset)')}",
+        f"WT_SESSION        : {os.environ.get('WT_SESSION', '(unset)')}",
+        f"TERM_PROGRAM      : {os.environ.get('TERM_PROGRAM', '(unset)')}",
+        "",
+        "=== terminal ===",
+        f"size              : {term_cols} cols x {term_rows} rows",
+        f"stdout isatty     : {sys.stdout.isatty()}",
+        f"console attached  : {_has_console()}",
+        f"VT processing     : {console_vt_enabled()}",
+        f"ansi escapes      : {supports_ansi(sys.stdout)}",
+        f"24-bit color      : {supports_true_color(sys.stdout)}",
+        f"grid              : {grid[0]}x{grid[1]} (status row {grid[1] + 1})",
+        "",
+        "=== dependencies ===",
+    ]
+    for module, declared in (("numpy", ">=1.24.0"), ("cv2", ">=4.8.0")):
+        try:
+            version = __import__(module).__version__
+        except Exception as exc:  # pragma: no cover - defensive
+            version = f"MISSING ({exc})"
+        lines.append(f"{module:<18}: {version}   declared {declared}")
+
+    state = State({"show_fps": True})
+    lines += [
+        "",
+        "=== render settings ===",
+        f"mode              : {state.mode}",
+        f"detail            : {state.detail[0]}",
+        f"mirror            : {state.mirror}",
+        f"black cutoff      : {state.black_cutoff}",
+        "",
+        "=== camera ===",
+    ]
+
+    if camera is None:
+        try:
+            camera = ThreadedCamera(index=0)
+        except Exception:  # pragma: no cover - defensive
+            camera = None
+
+    # Size the capture the same way the run loop does, so the reported
+    # resolution is what the app actually requests.
+    if camera is not None and hasattr(camera, "width") and not camera.is_open:
+        camera.width, camera.height = capture_size_for_grid(grid[0], grid[1])
+
+    resolution = None
+    if camera is not None:
+        try:
+            if not camera.is_open:
+                camera.open()
+            resolution = camera.actual_resolution
+            lines.append(
+                f"resolution        : "
+                f"{resolution[0]}x{resolution[1]}" if resolution
+                else "resolution        : unknown"
+            )
+        except CameraError as exc:
+            lines.append(f"resolution        : unavailable ({exc})")
+    else:
+        lines.append("resolution        : unavailable")
+
+    print("\n".join(lines), flush=True)
+
+    frames = 0
+    if camera is not None and camera.is_open:
+        renderer = Renderer(color_levels=state.color_quantize)
+        renderer.clear()
+        renderer.show_cursor_off()
+        try:
+            _wait_for_first_frame(camera, renderer, timeout=seconds)
+            cols, rows = compute_grid(
+                term_cols, term_rows, char_aspect=state.char_aspect,
+                source_aspect=(
+                    resolution[0] / resolution[1] if resolution else 16 / 9
+                ),
+            )
+            started = time.perf_counter()
+            while time.perf_counter() - started < seconds:
+                frame_start = time.perf_counter()
+                frame = camera.read()
+                if frame is None:
+                    time.sleep(0.05)
+                    continue
+                grid, colors = _prepare_frame(frame, state, cols, rows)
+                elapsed = max(1e-9, time.perf_counter() - started)
+                renderer.render(
+                    grid, mode=state.mode, fps=frames / elapsed,
+                    resolution=resolution, contrast=state.contrast,
+                    brightness=state.brightness, gamma=state.gamma, colors=colors,
+                    detail=state.detail[0], mirror=state.mirror,
+                    black_cutoff=state.black_cutoff,
+                    term_size=(term_cols, term_rows),
+                )
+                frames += 1
+                remaining = 1.0 / state.target_fps - (
+                    time.perf_counter() - frame_start
+                )
+                if remaining > 0:
+                    time.sleep(remaining)
+        finally:
+            renderer.show_cursor_on()
+            camera.close()
+
+    print("", flush=True)
+    print("=== measured ===", flush=True)
+    if frames:
+        print(
+            f"frames rendered   : {frames} in {seconds:g}s"
+            f"\nachieved fps      : {frames / seconds:.1f}",
+            flush=True,
+        )
+    else:
+        print("no frames rendered (camera unavailable)", flush=True)
+    return 0
 
 
-def _parse_camera_index(argv: list[str]) -> int:
-    """Read the camera index from ``--camera=N``; defaults to 0."""
+def _parse_args(argv: list[str]) -> tuple[int, bool, float]:
+    """Return (camera index, diagnose?, seconds) from the argument list."""
     index = 0
-    for arg in argv:
+    diagnose = False
+    seconds = 3.0
+    iterator = enumerate(argv)
+    for position, arg in iterator:
         if arg.startswith("--camera="):
             with contextlib.suppress(ValueError):
                 index = int(arg.split("=", 1)[1])
-    return index
+        elif arg in ("--diagnose", "-D"):
+            diagnose = True
+        elif arg in ("--seconds", "-s") and position + 1 < len(argv):
+            with contextlib.suppress(ValueError):
+                seconds = float(argv[position + 1])
+            next(iterator, None)
+        elif arg.startswith("--seconds="):
+            with contextlib.suppress(ValueError):
+                seconds = float(arg.split("=", 1)[1])
+    return index, diagnose, seconds
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    index = _parse_camera_index(argv)
+    index, diagnose, seconds = _parse_args(argv)
     camera = ThreadedCamera(index=index)
+    if diagnose:
+        return diagnostic_report(seconds=seconds, camera=camera)
     try:
         return run(camera=camera)
     except CameraError as exc:
