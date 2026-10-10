@@ -1,0 +1,11 @@
+# Live ASCII Camera - runtime dependencies
+#
+# Install with:  pip install -r requirements.txt
+#
+# Python 3.11 or newer is required (3.12 recommended).
+
+# Webcam capture and frame decode.
+opencv-python>=4.8.0
+
+# Vectorized image processing for the ASCII conversion.
+numpy>=1.24.0

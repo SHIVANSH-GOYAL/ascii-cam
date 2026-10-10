@@ -1,0 +1,17 @@
+# Normalize line endings so the repository stays LF regardless of the checkout
+# platform. Without this, Windows checkouts with core.autocrlf=true turn every
+# text file into CRLF and produce a whole-repo diff for macOS/Linux contributors.
+* text=auto eol=lf
+
+# Windows-only scripts are always CRLF and must not be converted.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary formats.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.whl binary

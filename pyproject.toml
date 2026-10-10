@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ascii-cam"
+version = "1.0.0"
+description = "Real-time webcam-to-ASCII rendering in the terminal"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "ASCII Camera contributors" }]
+keywords = ["ascii", "webcam", "terminal", "opencv", "numpy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Terminals",
+]
+
+# Runtime only. Pillow is required by calibrate_ramp.py during development and
+# is deliberately not a runtime dependency; see the [calibrate] extra.
+dependencies = [
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+# Tools for regenerating the character ramp from measured glyph coverage.
+calibrate = ["pillow>=9.0.0"]
+# Test and lint tooling.
+dev = ["pyflakes>=3.0.0", "pillow>=9.0.0"]
+
+[project.scripts]
+ascii-cam = "ascii_cam.main:main"
+
+[tool.setuptools]
+packages = ["ascii_cam"]
